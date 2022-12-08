@@ -1,0 +1,67 @@
+---
+name: Approve image tag
+on:
+  pull_request:
+    types:
+      - opened
+jobs:
+  approve_pr:
+    name: Approve PR of updating image tag
+    runs-on: ubuntu-latest
+    env:
+      TEAM: kumotsu_users # See CODEOWNERS
+      PATH_PREFIX: occurs # See CODEOWNERS
+      LINE_PREFIX: "newTag:" # Don't need to include leading whitespaces
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@v3
+      - name: Validate membership # Check if the actor has membership of TEAM
+        id: membership
+        # See: https://docs.github.com/en/rest/teams/members?apiVersion=2022-11-28#get-team-membership-for-a-user
+        run: |
+          MEMBERSHIP_HTTP_CODE=$( \
+            curl \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ env.GH_TOKEN }}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -s -o /dev/null -w "%{http_code}" \
+            https://api.github.com/orgs/moneyforward/teams/${{ env.TEAM }}/memberships/${{ github.actor }} \
+          )
+          echo ${{ github.actor }} # DEBUG
+          echo $MEMBERSHIP_HTTP_CODE # DEBUG
+          echo "IS_VALID=$(expr $MEMBERSHIP_HTTP_CODE == 200)" >> $GITHUB_OUTPUT
+      - name: Check tag changed
+        id: changes
+        if: steps.membership.outputs.IS_VALID == 1 # IS_VALID has the value `1` if the actor has an invalid membership
+        # - Loop through all changed files
+        # - Check if file path has PATH_PREFIX
+        # - Get only lines that have been added (See: https://stackoverflow.com/a/25498422) and check if all added lines have LINE_PREFIX
+        # If passed, set ONLY_UPDATE_TAG to `true`, otherwise set to `false`
+        run: |
+          FILE_CHANGES=$(git diff --name-only ${{ github.base_ref }}..${{ github.head_ref }})
+          ONLY_UPDATE_TAG=true
+          while read file_path; do
+            echo "${file_path}"
+            if [[ ${file_path} != ${{ env.PATH_PREFIX }}* ]]; then
+              echo "There is a changed file with a path that doesn't has \`${{ env.PATH_PREFIX }}\` prefix -> Finished"
+              ONLY_UPDATE_TAG=false
+              break
+            fi
+            ADDED_LINES=$(
+              git diff --color=always ${{ github.base_ref }}..${{ github.head_ref }} ${file_path} | \
+              perl -wlne 'print $1 if /^\e\[32m\+\e\[m\e\[32m(.*)\e\[m$/'
+            )
+            while read line; do
+              echo "  ${line}"
+              if [[ ${line} != ${{ env.LINE_PREFIX }}* ]]; then
+                echo "There is a added line that doesn't has \`${{ env.LINE_PREFIX }}\` prefix -> Finished"
+                ONLY_UPDATE_TAG=false
+                break
+              fi
+            done <<< $ADDED_LINES
+          done <<< $FILE_CHANGES
+          echo "ONLY_UPDATE_TAG=$(echo $ONLY_UPDATE_TAG)" >> $GITHUB_OUTPUT
+      - name: Approve PR
+        if: steps.changes.outputs.ONLY_UPDATE_TAG == 'true'
+        uses: hmarr/auto-approve-action@v3
